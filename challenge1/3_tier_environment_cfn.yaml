@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: 'AWS::Serverless-2016-10-31'
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: simpleWebsite
+  S3BucketName:
+    Type: String
+    Default: test-eu-west-1-simple-website-helloworld
+  DDBTableName:
+    Type: String
+    Default: userSession
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3BucketName}"
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref S3Bucket
+                - /*
+      Bucket: !Ref S3Bucket
+  myDDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${DDBTableName}"
+      AttributeDefinitions:
+        -
+          AttributeName: "ID"
+          AttributeType: "S"
+      KeySchema:
+        - 
+          AttributeName: "ID"
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  IamRoleLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "static-website-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Path: '/' 
+      Policies:
+        - PolicyName: !Sub website-policy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/userSession"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  WebsiteApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: sandbox
+      Name: !Ref ServiceName
+      Tags:
+        Name: !Ref ServiceName
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+
+  Backendlambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Sub "website-lambda-${ServiceName}"
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      MemorySize: 1024
+      Timeout: 180
+      InlineCode: |
+        import json
+        import boto3
+        from time import gmtime, strftime
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('userSession')
+        now = strftime("%a, %d %b %Y %H:%M:%S +0000", gmtime())
+        def lambda_handler(event, context):
+            input = json.loads(event['body'])
+            name  = input['firstName'] +' '+ input['firstName']
+            response = table.put_item(
+                Item={
+                    'ID': name,
+                    'registrationTime':now
+                    })
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                },
+                'body': json.dumps('Hello from Lambda, ' + name)
+            }
+      Role: !GetAtt IamRoleLambda.Arn
+      Events:
+        CreateUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WebsiteApi
+            Path: /
+            Method: POST
